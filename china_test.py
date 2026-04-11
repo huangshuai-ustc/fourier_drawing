@@ -3,453 +3,385 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Circle, Polygon
 from matplotlib.font_manager import FontProperties
+from matplotlib.lines import Line2D
 from scipy.fft import fft
-import warnings
+import platform, os, warnings
 warnings.filterwarnings('ignore')
 
 # ============ 中文字体 ============
-CN_FONT = FontProperties(fname='/System/Library/Fonts/STHeiti Medium.ttc')
+_sys = platform.system()
+if _sys == 'Darwin':
+    CN_FONT = FontProperties(fname='/System/Library/Fonts/STHeiti Medium.ttc')
+elif _sys == 'Windows':
+    CN_FONT = FontProperties(fname='C:/Windows/Fonts/msyh.ttc')
+else:
+    try:
+        CN_FONT = FontProperties(fname='/usr/share/fonts/truetype/wqy/wqy-microhei.ttc')
+    except:
+        CN_FONT = FontProperties()
 
-# 国旗颜色
-CHRED = '#EE1C25'
-CHYEL = '#FFFF00'
+CHRED, CHYEL = '#EE1C25', '#FFFF00'
 
 
 # ================================================================
-# 1. 根据 LaTeX 精确定义生成星星顶点
+# 1. 星星顶点
 # ================================================================
-
-def create_star_vertices_latex():
-    """
-    LaTeX 模板中的五角星10个顶点（外-内交替）
-    模板中顶点最远距离原点 = 4
-    """
+def star_verts():
     s5 = np.sqrt(5)
-    vertices = np.array([
-        [0, 4],
-        [np.sqrt(50 - 22 * s5), -1 + s5],
-        [np.sqrt(10 + 2 * s5), -1 + s5],
-        [2 * np.sqrt(5 - 2 * s5), 4 - 2 * s5],
-        [np.sqrt(10 - 2 * s5), -1 - s5],
-        [0, -6 + 2 * s5],
-        [-np.sqrt(10 - 2 * s5), -1 - s5],
-        [-2 * np.sqrt(5 - 2 * s5), 4 - 2 * s5],
-        [-np.sqrt(10 + 2 * s5), -1 + s5],
-        [-np.sqrt(50 - 22 * s5), -1 + s5],
+    return np.array([
+        [0,4],[np.sqrt(50-22*s5),-1+s5],[np.sqrt(10+2*s5),-1+s5],
+        [2*np.sqrt(5-2*s5),4-2*s5],[np.sqrt(10-2*s5),-1-s5],
+        [0,-6+2*s5],[-np.sqrt(10-2*s5),-1-s5],
+        [-2*np.sqrt(5-2*s5),4-2*s5],[-np.sqrt(10+2*s5),-1+s5],
+        [-np.sqrt(50-22*s5),-1+s5],
     ])
-    return vertices
 
-
-def transform_vertices(vertices, shift_x, shift_y, scale, rotate_deg):
-    """
-    模拟 LaTeX tikz 的 scope 变换链：缩放 → 旋转 → 平移
-    然后从 LaTeX 坐标系（中心原点, y向上）转到画布坐标系（左上原点, y向下）
-    """
-    v = vertices.copy() * scale
-
-    angle_rad = np.radians(rotate_deg)
-    cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
-    rot = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-    v = v @ rot.T
-
-    v[:, 0] += shift_x
-    v[:, 1] += shift_y
-
-    # LaTeX → 画布: x_new = x+15, y_new = 10-y
-    v[:, 0] = v[:, 0] + 15
-    v[:, 1] = 10 - v[:, 1]
+def xform(v, sx, sy, sc, rot):
+    v = v.copy() * sc
+    a = np.radians(rot)
+    R = np.array([[np.cos(a),-np.sin(a)],[np.sin(a),np.cos(a)]])
+    v = v @ R.T
+    v[:,0] += sx + 15
+    v[:,1] = 10 - (v[:,1] + sy)
     return v
 
 
 # ================================================================
-# 2. 沿闭合多边形边缘密集采样
+# 2. 采样
 # ================================================================
+def sample_poly(verts, n):
+    verts = np.vstack([verts, verts[0]])
+    edges = np.linalg.norm(np.diff(verts, axis=0), axis=1)
+    total = edges.sum()
+    pts = []
+    for i, el in enumerate(edges):
+        ns = max(int(round(n * el / total)), 1)
+        for j in range(ns):
+            pts.append(verts[i] + j/ns * (verts[i+1] - verts[i]))
+    pts = np.array(pts)
+    if len(pts) != n:
+        ot = np.linspace(0, 1, len(pts), endpoint=False)
+        nt = np.linspace(0, 1, n, endpoint=False)
+        pts = np.column_stack([np.interp(nt, ot, pts[:,0]),
+                               np.interp(nt, ot, pts[:,1])])
+    return pts
 
-def sample_closed_polygon(vertices, num_points):
-    """
-    沿闭合多边形的边缘均匀采样，返回 num_points 个点
-    保证首尾相接（不重复首点）
-    """
-    n = len(vertices)
-    edges = []
-    total_len = 0.0
-    for i in range(n):
-        seg = vertices[(i + 1) % n] - vertices[i]
-        length = np.linalg.norm(seg)
-        edges.append(length)
-        total_len += length
-
-    points = []
-    for i in range(n):
-        n_seg = max(int(round(num_points * edges[i] / total_len)), 1)
-        start = vertices[i]
-        end = vertices[(i + 1) % n]
-        for j in range(n_seg):
-            t = j / n_seg
-            points.append(start + t * (end - start))
-
-    points = np.array(points)
-    if len(points) > num_points:
-        indices = np.linspace(0, len(points) - 1, num_points, dtype=int)
-        points = points[indices]
-    elif len(points) < num_points:
-        old_t = np.linspace(0, 1, len(points), endpoint=False)
-        new_t = np.linspace(0, 1, num_points, endpoint=False)
-        points = np.column_stack([
-            np.interp(new_t, old_t, points[:, 0]),
-            np.interp(new_t, old_t, points[:, 1]),
-        ])
-
-    return points
-
-
-def sample_closed_rectangle(width, height, num_points):
-    """采样矩形边缘"""
-    vertices = np.array([
-        [0, 0], [width, 0], [width, height], [0, height]
-    ])
-    return sample_closed_polygon(vertices, num_points)
+def sample_rect(w, h, n):
+    return sample_poly(np.array([[0,0],[w,0],[w,h],[0,h]]), n)
 
 
 # ================================================================
-# 3. 生成六条闭合轮廓
+# 3. 轮廓
 # ================================================================
-
-def generate_all_contours(samples_per_contour=2000):
-    """
-    生成6条独立的闭合轮廓:
-      0: 矩形边框 30×20
-      1: 大五角星
-      2-5: 四颗小五角星
-    返回 list of (points_array, color_str, label_str)
-    """
-    outer_shift = (-10, 5)
-
-    large_star = transform_vertices(
-        create_star_vertices_latex(),
-        shift_x=outer_shift[0], shift_y=outer_shift[1],
-        scale=3 / 4, rotate_deg=0,
-    )
-
-    small_params = [
-        (5, 3, 90 + np.degrees(np.arctan(3 / 5))),
-        (7, 1, 90 + np.degrees(np.arctan(1 / 7))),
-        (7, -2, 90 - np.degrees(np.arctan(2 / 7))),
-        (5, -4, 90 - np.degrees(np.arctan(4 / 5))),
-    ]
-    small_stars = []
-    for dx, dy, rot in small_params:
-        star = transform_vertices(
-            create_star_vertices_latex(),
-            shift_x=outer_shift[0] + dx,
-            shift_y=outer_shift[1] + dy,
-            scale=1 / 4, rotate_deg=rot,
-        )
-        small_stars.append(star)
-
-    contours = []
-
-    rect_pts = sample_closed_rectangle(30, 20, samples_per_contour)
-    contours.append((rect_pts, '#FFFFFF', '矩形边框'))
-
-    large_pts = sample_closed_polygon(large_star, samples_per_contour)
-    contours.append((large_pts, CHYEL, '大星'))
-
-    for i, star in enumerate(small_stars):
-        pts = sample_closed_polygon(star, samples_per_contour)
-        contours.append((pts, CHYEL, f'小星{i + 1}'))
-
-    return contours, [large_star] + small_stars
+def gen_contours(N=1500):
+    ox, oy = -10, 5
+    lg = xform(star_verts(), ox, oy, 3/4, 0)
+    sms = []
+    for dx, dy, rot in [(5,3,90+np.degrees(np.arctan(3/5))),
+                         (7,1,90+np.degrees(np.arctan(1/7))),
+                         (7,-2,90-np.degrees(np.arctan(2/7))),
+                         (5,-4,90-np.degrees(np.arctan(4/5)))]:
+        sms.append(xform(star_verts(), ox+dx, oy+dy, 1/4, rot))
+    cs = [(sample_rect(30, 20, N), '#FFFFFF', '边框'),
+          (sample_poly(lg, N), CHYEL, '大星')]
+    for i, s in enumerate(sms):
+        cs.append((sample_poly(s, N), CHYEL, f'小星{i+1}'))
+    return cs, [lg] + sms
 
 
 # ================================================================
-# 4. 单条轮廓的傅里叶分析器
+# 4. 傅里叶
 # ================================================================
-
-class SingleContourFourier:
-    """对一条闭合轮廓做傅里叶分析"""
-
-    def __init__(self, points, max_harmonics=150, label=''):
-        self.label = label
-        self.points = np.asarray(points, dtype=float)
-        self.max_harmonics = max_harmonics
-
-        if not np.allclose(self.points[0], self.points[-1]):
-            self.points = np.vstack([self.points, self.points[0]])
-
-        self._compute()
-
-    def _compute(self):
-        n = len(self.points)
-        z = self.points[:, 0] + 1j * self.points[:, 1]
-        coeffs = fft(z) / n
-
-        amplitudes = np.abs(coeffs)
-        order = np.argsort(amplitudes)[::-1]
-
-        self.epicycles = []
+class CFourier:
+    def __init__(self, pts, mh=120):
+        pts = np.asarray(pts, float)
+        if not np.allclose(pts[0], pts[-1]):
+            pts = np.vstack([pts, pts[0]])
+        n = len(pts)
+        z = pts[:,0] + 1j * pts[:,1]
+        c = fft(z) / n
+        amp = np.abs(c)
+        order = np.argsort(amp)[::-1]
+        self.epis = []
         for idx in order:
-            amp = amplitudes[idx]
-            if amp < 1e-9:
+            if amp[idx] < 1e-9:
                 continue
-            freq = idx if idx <= n // 2 else idx - n
-            phase = np.angle(coeffs[idx])
-            self.epicycles.append({'freq': freq, 'amp': amp, 'phase': phase})
-            if len(self.epicycles) >= self.max_harmonics:
+            f = idx if idx <= n//2 else idx - n
+            self.epis.append({'f': f, 'a': amp[idx], 'p': np.angle(c[idx])})
+            if len(self.epis) >= mh:
                 break
+        self.epis.sort(key=lambda e: abs(e['f']))
 
-        self.epicycles.sort(key=lambda e: abs(e['freq']))
+    def eval_arr(self, ts):
+        ts = np.asarray(ts)
+        z = np.zeros(len(ts), dtype=complex)
+        for e in self.epis:
+            z += e['a'] * np.exp(1j * (2*np.pi*e['f']*ts + e['p']))
+        return np.column_stack([z.real, z.imag])
 
-    def evaluate(self, t):
-        """t ∈ [0,1] → (x, y)"""
-        z = sum(
-            e['amp'] * np.exp(1j * (2 * np.pi * e['freq'] * t + e['phase']))
-            for e in self.epicycles
-        )
-        return z.real, z.imag
-
-    def epicycle_chain(self, t):
-        """返回圆环链各节点 [(x0,y0), (x1,y1), ...]"""
-        cx, cy = 0.0, 0.0
-        chain = [(cx, cy)]
-        for e in self.epicycles:
-            angle = 2 * np.pi * e['freq'] * t + e['phase']
-            cx += e['amp'] * np.cos(angle)
-            cy += e['amp'] * np.sin(angle)
-            chain.append((cx, cy))
-        return chain
+    def chain(self, t, mc=20):
+        """返回所有分量的圆心链，长度 = min(mc, len(epis)) + 1"""
+        cx = cy = 0.0
+        pts = [(cx, cy)]
+        for e in self.epis[:mc]:
+            ang = 2*np.pi*e['f']*t + e['p']
+            cx += e['a'] * np.cos(ang)
+            cy += e['a'] * np.sin(ang)
+            pts.append((cx, cy))
+        return pts
 
 
 # ================================================================
-# 5. 静态国旗
+# 5. 静态
 # ================================================================
-
-def draw_static_flag(star_vertices_list):
-    fig, ax = plt.subplots(figsize=(12, 8))
-    ax.set_xlim(-1, 31)
-    ax.set_ylim(21, -1)
-    ax.set_aspect('equal')
-    ax.set_title('中华人民共和国国旗',
-                 fontproperties=CN_FONT, fontsize=16, fontweight='bold')
-
-    ax.add_patch(plt.Rectangle((0, 0), 30, 20,
-                               facecolor=CHRED, edgecolor='black', linewidth=2))
-
-    # names = ['大星', '小星1', '小星2', '小星3', '小星4']
-    for i, verts in enumerate(star_vertices_list):
-        ax.add_patch(Polygon(verts, closed=True,
-                             facecolor=CHYEL, edgecolor='gold', linewidth=1))
-        cx, cy = verts.mean(axis=0)
-        # ax.text(cx, cy + (1.8 if i == 0 else 0.9), names[i],
-        #         ha='center', fontproperties=CN_FONT,
-        #         fontsize=8, color='white', fontweight='bold')
-
-    # ax.grid(True, alpha=0.2, linestyle='--')
+def draw_static(sv):
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.set_xlim(-1, 31); ax.set_ylim(21, -1); ax.set_aspect('equal')
+    ax.set_title('中华人民共和国国旗', fontproperties=CN_FONT, fontsize=16, fontweight='bold')
+    ax.add_patch(plt.Rectangle((0,0), 30, 20, fc=CHRED, ec='black', lw=2))
+    for v in sv:
+        ax.add_patch(Polygon(v, closed=True, fc=CHYEL, ec='gold', lw=1))
     plt.tight_layout()
-    plt.savefig('chinese_flag_static.png', dpi=150, bbox_inches='tight')
+    plt.savefig('flag_static.png', dpi=150, bbox_inches='tight')
     plt.show()
 
 
 # ================================================================
-# 6. 六路傅里叶同时绘制动画
+# 6. 动画
 # ================================================================
+def create_anim(contours, sv,
+                frames=400, fps=25,
+                max_harm=120, n_circles=None):
+    """n_circles=None 表示用全部分量的圆"""
 
-def create_multi_fourier_animation(contours, star_vertices_list,
-                                   frames=3000, interval=16,
-                                   max_harmonics=200,
-                                   num_display_circles=25):
-    """
-    6 条轮廓各自独立做傅里叶，同时绘制
-    左图: 6 组圆环机构
-    右图: 6 条轨迹逐渐成形
-    """
-
-    # --- 构建傅里叶分析器 ---
-    analyzers = []
-    for pts, color, label in contours:
-        fa = SingleContourFourier(pts, max_harmonics=max_harmonics, label=label)
+    analyzers, all_traces = [], []
+    for pts, _, label in contours:
+        fa = CFourier(pts, max_harm)
         analyzers.append(fa)
-        print(f"  [{label}] 使用 {len(fa.epicycles)} 个傅里叶分量")
+        all_traces.append(fa.eval_arr(np.linspace(0, 1, frames, endpoint=False)))
+        print(f"  [{label}] {len(fa.epis)} 分量")
 
-    # --- 预计算范围 ---
-    all_test = []
+    # 每个轮廓实际使用的圆环数 = 全部分量
+    nc_list = []
     for fa in analyzers:
-        for t in np.linspace(0, 1, 500):
-            all_test.append(fa.evaluate(t))
-    all_test = np.array(all_test)
-    margin = 2
-    x_min, x_max = all_test[:, 0].min() - margin, all_test[:, 0].max() + margin
-    y_min, y_max = all_test[:, 1].min() - margin, all_test[:, 1].max() + margin
+        nc = len(fa.epis) if n_circles is None else min(n_circles, len(fa.epis))
+        nc_list.append(nc)
+        print(f"    → 圆环数: {nc}")
 
-    # --- 配色 ---
-    trace_colors = ['#FFFFFF', '#FFD700',
-                    '#FFA500', '#FF6347', '#FF69B4', '#DA70D6']
+    ap = np.vstack(all_traces); mg = 2
+    xn, xx = ap[:,0].min()-mg, ap[:,0].max()+mg
+    yn, yx = ap[:,1].min()-mg, ap[:,1].max()+mg
 
-    # --- 创建画布 ---
-    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(22, 10))
-    fig.patch.set_facecolor('#1a1a2e')
+    fill_c = [CHRED, CHYEL, CHYEL, CHYEL, CHYEL, CHYEL]
 
-    for ax in [ax_left, ax_right]:
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_max, y_min)  # y 翻转
-        ax.set_aspect('equal')
-        ax.set_facecolor('#1a1a2e')
-        ax.grid(True, alpha=0.1, color='gray', linestyle='--')
-        ax.tick_params(colors='gray')
-        for spine in ax.spines.values():
-            spine.set_color('gray')
-            spine.set_alpha(0.3)
+    # 深色系 —— 白底上清晰可见
+    circ_colors = ['#333333', '#B8860B', '#CC6600', '#CC2222', '#BB2288', '#8822AA']
+    link_colors = ['#222222', '#996600', '#AA5500', '#AA1111', '#991177', '#771199']
+    trac_colors = ['#555555', '#DAA520', '#E08800', '#DD4444', '#DD3399', '#AA44BB']
+    pen_colors  = ['#FF0000', '#FF8C00', '#FF6600', '#FF2222', '#FF33AA', '#CC44FF']
 
-    ax_left.set_title('6 组傅里叶圆环机构', fontproperties=CN_FONT,
-                      fontsize=14, fontweight='bold', color='white')
-    ax_right.set_title('六路同时绘制', fontproperties=CN_FONT,
-                       fontsize=14, fontweight='bold', color='white')
+    # --- 双面板 ---
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(14, 6))
+    fig.patch.set_facecolor('white')
 
-    # 右图：淡色目标轮廓
-    for pts, color, label in contours:
-        ax_right.plot(pts[:, 0], pts[:, 1], '--',
-                      color=color, alpha=0.15, linewidth=0.8)
+    for ax in [axL, axR]:
+        ax.set_xlim(xn, xx); ax.set_ylim(yx, yn); ax.set_aspect('equal')
+        ax.set_facecolor('white'); ax.grid(False)
+        ax.set_xticks([]); ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
 
-    # --- 为每条轮廓创建绘图对象 ---
+    axL.set_title('傅里叶圆环机构', fontproperties=CN_FONT, fontsize=12,
+                  fontweight='bold', color='#333')
+    axR.set_title('渐进绘制 & 填色', fontproperties=CN_FONT, fontsize=12,
+                  fontweight='bold', color='#333')
+
+    # 右图淡参考线
+    for pts, color, _ in contours:
+        c = '#ddd' if color == '#FFFFFF' else '#FFF3B0'
+        axR.plot(pts[:,0], pts[:,1], '--', color=c, alpha=0.3, lw=0.5)
+
+    # --- 创建绘图对象 ---
     circle_objs = []
     chain_lines = []
-    pen_lefts = []
-    pen_rights = []
-    trace_lines = []
-    trace_data = []
+    traceL = []
+    penL = []
+    traceR = []
+    penR = []
+    fills = []
 
-    for k, (fa, (_, color, label)) in enumerate(zip(analyzers, contours)):
-        tc = trace_colors[k]
+    for k, fa in enumerate(analyzers):
+        nc = nc_list[k]
 
-        n_show = min(num_display_circles, len(fa.epicycles))
-        circles_k = []
-        for i in range(n_show):
-            amp = fa.epicycles[i]['amp']
-            c = Circle((0, 0), amp, fill=False,
-                       edgecolor=tc, linewidth=0.6, alpha=0.35)
-            ax_left.add_patch(c)
-            circles_k.append(c)
-        circle_objs.append(circles_k)
+        # 左图：所有圆环
+        cks = []
+        for i in range(nc):
+            # 小圆用更细更透明，大圆用粗一点
+            r = fa.epis[i]['a']
+            if r > 0.5:
+                lw, alpha = 0.8, 0.45
+            elif r > 0.1:
+                lw, alpha = 0.5, 0.3
+            else:
+                lw, alpha = 0.3, 0.15
+            ci = Circle((0, 0), r, fill=False,
+                        ec=circ_colors[k], lw=lw, alpha=alpha, zorder=3)
+            axL.add_patch(ci)
+            cks.append(ci)
+        circle_objs.append(cks)
 
-        line, = ax_left.plot([], [], '-', color=tc, linewidth=0.7, alpha=0.5)
-        chain_lines.append(line)
+        # 左图：连杆线
+        cl, = axL.plot([], [], '-', color=link_colors[k],
+                       lw=0.8, alpha=0.5, zorder=5)
+        chain_lines.append(cl)
 
-        pl, = ax_left.plot([], [], 'o', color=tc, markersize=4, zorder=10)
-        pr, = ax_right.plot([], [], 'o', color=tc, markersize=4, zorder=10)
-        pen_lefts.append(pl)
-        pen_rights.append(pr)
+        # 左图：已画轨迹
+        tl_l, = axL.plot([], [], '-', color=trac_colors[k],
+                         lw=1.0, alpha=0.6, zorder=6)
+        traceL.append(tl_l)
 
-        lw = 2.5 if k == 0 else (2.0 if k == 1 else 1.5)
-        tl, = ax_right.plot([], [], '-', color=tc, linewidth=lw, alpha=0.9)
-        trace_lines.append(tl)
-        trace_data.append(([], []))
+        # 左图：笔尖
+        pl, = axL.plot([], [], 'o', color=pen_colors[k],
+                       ms=5, zorder=10, markeredgecolor='black',
+                       markeredgewidth=0.5)
+        penL.append(pl)
 
-    # 进度文字
-    info_text = fig.text(0.5, 0.02, '', ha='center',
-                         fontproperties=CN_FONT, fontsize=12, color='white',
-                         bbox=dict(boxstyle='round', facecolor='#2d2d44', alpha=0.9))
+        # 右图：轨迹
+        lw_r = 1.4 if k <= 1 else 1.0
+        tl_r, = axR.plot([], [], '-', color=trac_colors[k],
+                         lw=lw_r, alpha=0.85, zorder=12)
+        traceR.append(tl_r)
+
+        # 右图：笔尖
+        pr, = axR.plot([], [], 'o', color=pen_colors[k],
+                       ms=4, zorder=15, markeredgecolor='black',
+                       markeredgewidth=0.5)
+        penR.append(pr)
+
+        # 右图：填色
+        fp = Polygon([[0,0]], closed=True, fc=fill_c[k],
+                     ec='none', alpha=0.0, zorder=5)
+        axR.add_patch(fp)
+        fills.append(fp)
+
+    info = fig.text(0.5, 0.02, '', ha='center', fontproperties=CN_FONT,
+                    fontsize=9, color='#555',
+                    bbox=dict(boxstyle='round,pad=0.3', fc='#f5f5f5', ec='#ddd'))
 
     # 图例
-    from matplotlib.lines import Line2D
-    legend_elements = []
-    for k, (_, color, label) in enumerate(contours):
-        legend_elements.append(
-            Line2D([0], [0], color=trace_colors[k], linewidth=2, label=label))
-    ax_right.legend(handles=legend_elements, loc='upper right',
-                    fontsize=9, facecolor='#2d2d44', edgecolor='gray',
-                    labelcolor='white', prop=CN_FONT)
+    axR.legend(handles=[Line2D([0],[0], color=trac_colors[k], lw=2,
+               label=contours[k][2]) for k in range(len(contours))],
+               loc='upper right', fontsize=8, facecolor='white',
+               edgecolor='#ccc', labelcolor='#333', prop=CN_FONT, framealpha=0.8)
+
+    def thin(arr, mx=250):
+        if len(arr) <= mx:
+            return arr
+        return arr[np.linspace(0, len(arr)-1, mx, dtype=int)]
 
     def update(frame):
         t = frame / frames
+        n = frame + 1
+        is_last = (frame == frames - 1)
 
         for k, fa in enumerate(analyzers):
-            chain = fa.epicycle_chain(t)
-            n_show = len(circle_objs[k])
+            seg = all_traces[k][:n]
+            px, py = seg[-1]
+            nc = nc_list[k]
 
-            for i in range(n_show):
-                if i < len(chain) - 1:
-                    circle_objs[k][i].center = chain[i]
+            if not is_last:
+                # === 左图：圆环跟随 ===
+                ch = fa.chain(t, nc)
+                for i in range(nc):
+                    if i < len(ch) - 1:
+                        circle_objs[k][i].center = ch[i]
+                        circle_objs[k][i].set_visible(True)
 
-            cx = [c[0] for c in chain[:n_show + 1]]
-            cy = [c[1] for c in chain[:n_show + 1]]
-            chain_lines[k].set_data(cx, cy)
+                # 连杆线
+                xs = [p[0] for p in ch]
+                ys = [p[1] for p in ch]
+                chain_lines[k].set_data(xs, ys)
 
-            px, py = fa.evaluate(t)
-            pen_lefts[k].set_data([px], [py])
-            pen_rights[k].set_data([px], [py])
+                # 左图轨迹
+                traceL[k].set_data(seg[:,0], seg[:,1])
 
-            trace_data[k][0].append(px)
-            trace_data[k][1].append(py)
-            trace_lines[k].set_data(trace_data[k][0], trace_data[k][1])
+                # 左图笔尖
+                penL[k].set_data([px], [py])
 
-        progress = t * 100
-        info_text.set_text(
-            f'绘制进度: {progress:.1f}%  |  '
-            f'6 条独立傅里叶同时绘制  |  '
-            f'每条 ≤{max_harmonics} 个谐波'
-        )
+                # === 右图 ===
+                traceR[k].set_data(seg[:,0], seg[:,1])
+                penR[k].set_data([px], [py])
 
-        if progress >= 99.5:
-            ax_right.set_title('✓ 六路傅里叶绘制完成！', fontproperties=CN_FONT,
-                               fontsize=14, fontweight='bold', color='#00ff88')
+                # 填色
+                if t > 0.08 and n >= 3:
+                    alpha = min(1.0, ((t - 0.08) / 0.82) ** 1.3)
+                    fills[k].set_xy(thin(seg))
+                    fills[k].set_alpha(alpha)
+            else:
+                # === 最后一帧 ===
+                full = all_traces[k]
 
-        return (chain_lines + pen_lefts + pen_rights +
-                trace_lines + [info_text] +
-                [c for cl in circle_objs for c in cl])
+                # 左图：隐藏圆环和连杆，保留完整轨迹
+                for ci in circle_objs[k]:
+                    ci.set_visible(False)
+                chain_lines[k].set_data([], [])
+                penL[k].set_data([], [])
+
+                # 左图保留完整轨迹线
+                traceL[k].set_data(full[:,0], full[:,1])
+                traceL[k].set_alpha(1.0)
+                traceL[k].set_linewidth(1.5 if k <= 1 else 1.0)
+
+                # 右图完整填色
+                fills[k].set_xy(full)
+                fills[k].set_alpha(1.0)
+                traceR[k].set_data(full[:,0], full[:,1])
+                penR[k].set_data([], [])
+
+        pct = t * 100
+        if not is_last:
+            info.set_text(f'进度 {pct:.0f}%  |  {max_harm} 谐波  |  圆环=全部分量')
+        else:
+            info.set_text('✓ 完成')
+            axL.set_title('傅里叶绘制结果', fontproperties=CN_FONT,
+                          fontsize=12, fontweight='bold', color='#228B22')
+            axR.set_title('五星红旗 ✓', fontproperties=CN_FONT,
+                          fontsize=12, fontweight='bold', color='#228B22')
 
     anim = FuncAnimation(fig, update, frames=frames,
-                         interval=interval, blit=False, repeat=False)
-
+                         interval=1000//fps, blit=False, repeat=False)
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.07)
-    return anim, fig
+    return anim, fig, fps
 
 
 # ================================================================
-# 7. 主程序
-# ================================================================
-
 if __name__ == "__main__":
-    print("=" * 70)
-    print("六路傅里叶同时绘制五星红旗")
-    print("每个封闭图形（矩形 + 5 颗星）各自独立傅里叶，无跳跃")
-    print("=" * 70)
+    print("=" * 50)
+    print("  五星红旗 · 傅里叶双面板 · 全圆环版")
+    print("=" * 50)
 
-    # 生成轮廓
-    print("\n1. 生成 6 条闭合轮廓...")
-    contours, star_verts = generate_all_contours(samples_per_contour=3000)
-    for pts, color, label in contours:
-        print(f"   [{label}] {len(pts)} 个采样点  "
-              f"X:[{pts[:, 0].min():.2f}, {pts[:, 0].max():.2f}]  "
-              f"Y:[{pts[:, 1].min():.2f}, {pts[:, 1].max():.2f}]")
+    contours, sv = gen_contours(N=1500)
+    draw_static(sv)
 
-    # 静态国旗
-    print("\n2. 显示静态国旗...")
-    draw_static_flag(star_verts)
+    print("\n构建动画 (400帧 ≈ 16秒)...")
+    anim, fig, fps = create_anim(contours, sv,
+                                  frames=400, fps=25,
+                                  max_harm=120,
+                                  n_circles=None)  # None = 全部分量都画圆
 
-    # 动画
-    print("\n3. 构建六路傅里叶动画...")
-    anim, fig = create_multi_fourier_animation(
-        contours, star_verts,
-        frames=3000,
-        interval=16,
-        max_harmonics=200,
-        num_display_circles=25,
-    )
-
-    # 保存
-    print("\n4. 保存动画...")
+    print("保存 GIF...")
     try:
-        anim.save('flag_6fourier.gif', writer='pillow', fps=30, dpi=80)
-        print("   ✓ 已保存 flag_6fourier.gif")
+        anim.save('flag_fourier.gif', writer='pillow', fps=fps, dpi=72)
+        mb = os.path.getsize('flag_fourier.gif') / 1024 / 1024
+        print(f"  ✓ flag_fourier.gif  ({mb:.1f} MB)")
     except Exception as e:
-        print(f"   gif 保存失败: {e}")
+        print(f"  GIF失败: {e}")
         try:
-            anim.save('flag_6fourier.mp4', writer='ffmpeg', fps=30, dpi=100)
-            print("   ✓ 已保存 flag_6fourier.mp4")
+            anim.save('flag_fourier.mp4', writer='ffmpeg', fps=fps, dpi=80)
+            print("  ✓ flag_fourier.mp4")
         except Exception as e2:
-            print(f"   mp4 也失败: {e2}")
+            print(f"  MP4也失败: {e2}")
 
-    print("\n5. 显示动画...")
     plt.show()
-    print("\n✓ 完成！")
+    print("✓ 完成")
