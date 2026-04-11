@@ -99,7 +99,7 @@ class CFourier:
             pts = np.vstack([pts, pts[0]])
         n = len(pts)
         z = pts[:,0] + 1j * pts[:,1]
-        c = fft(z) / n
+        c = fft(z) / n # type: ignore
         amp = np.abs(c)
         order = np.argsort(amp)[::-1]
         self.epis = []
@@ -117,7 +117,7 @@ class CFourier:
         z = np.zeros(len(ts), dtype=complex)
         for e in self.epis:
             z += e['a'] * np.exp(1j * (2*np.pi*e['f']*ts + e['p']))
-        return np.column_stack([z.real, z.imag])
+        return np.column_stack([z.real, z.imag]) # type: ignore
 
     def chain(self, t, mc=20):
         cx = cy = 0.0
@@ -139,7 +139,7 @@ def draw_static(sv):
     ax.set_title('中华人民共和国国旗', fontproperties=CN_FONT, fontsize=16, fontweight='bold')
     ax.set_xlabel('X', fontproperties=CN_FONT)
     ax.set_ylabel('Y', fontproperties=CN_FONT)
-    ax.add_patch(plt.Rectangle((0,0), 30, 20, fc=CHRED, ec='black', lw=2))
+    ax.add_patch(plt.Rectangle((0,0), 30, 20, fc=CHRED, ec='black', lw=2)) # type: ignore
     for v in sv:
         ax.add_patch(Polygon(v, closed=True, fc=CHYEL, ec='gold', lw=1))
     plt.tight_layout()
@@ -347,7 +347,7 @@ def create_anim(contours, sv,
             axR.set_title('五星红旗 ✓', fontproperties=CN_FONT,
                           fontsize=14, fontweight='bold', color='green')
 
-    anim = FuncAnimation(fig, update, frames=frames,
+    anim = FuncAnimation(fig, update, frames=frames, # type: ignore
                          interval=1000//fps, blit=False, repeat=False)
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.07)

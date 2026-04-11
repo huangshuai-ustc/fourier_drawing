@@ -159,7 +159,7 @@ def draw_static_flag(all_stars):
     ax.set_xlabel('X', fontproperties=CN_FONT)
     ax.set_ylabel('Y', fontproperties=CN_FONT)
 
-    flag_bg = plt.Rectangle((0, 0), 30, 20,
+    flag_bg = plt.Rectangle((0, 0), 30, 20, # type: ignore
                             facecolor=CHRED, edgecolor='black', linewidth=2)
     ax.add_patch(flag_bg)
 
@@ -190,7 +190,7 @@ class FourierDrawingAnimation:
     def compute_fourier_coefficients(self):
         n_points = len(self.points)
         z = self.points[:, 0] + 1j * self.points[:, 1]
-        self.coeffs = fft(z) / n_points
+        self.coeffs = fft(z) / n_points # type: ignore
         self.n_points = n_points
 
     def prepare_epicycles(self):
@@ -278,7 +278,7 @@ class FourierDrawingAnimation:
                      'g--', alpha=0.3, linewidth=1)
 
         display_eps = self.epicycles[:min(num_display_circles, len(self.epicycles))]
-        colors = plt.cm.hsv(np.linspace(0, 0.9, len(display_eps)))
+        colors = plt.cm.hsv(np.linspace(0, 0.9, len(display_eps))) # type: ignore
 
         circles = []
         for i, ep in enumerate(display_eps):
